@@ -1,0 +1,1259 @@
+---
+title: "FDA Challange - Mismatch Detection"
+author: "Jean Ge, Josh Wildig, Luis E. Muller, Sayed Hasan, Tomal Karmakar"
+date: "21/10/2018"
+output: 
+  html_document:
+    theme: flatly 
+    highlight: tango
+    toc: true
+    toc_float: true
+---
+
+<style>
+h3 {
+  color: white;
+  background-color: #44546a;
+  text-indent: 25px; 
+</style>
+
+
+### Introduction
+  
+Many developments have been made in biomedical research in recent years and one of the fields responsible for such achievements is the field of Genomics. Genomic research studies the structure and function of the DNA and has applications in a variety of fields including drug development, bioengineering and the study of evolutionary processes. Functional Genomics is a subfield of genomics concerned with functions and interactions of genes and proteins. Further, proteomics is specifically concerned with functions and interactions of proteins[1]. 
+
+In the Cancer research field, some institutes of prevention and treatment are generating and integrating genetic data (multi-omics data) with the purpose of provide the most precise treatment for each patient.
+One of the many challenges that the researchers faces is the swapping of patients' multi-omics data due to human error in different stages of data production and preliminary analysis. These errors generate mislabelled data that result in inconclusive studies[2].  
+
+The challenge and the purpose of this project is to try to detect those mislabelled samples so it can be fixed or removed from the dataset before the analysis process. To achieve such purpose, data-mining and machine learning techniques were applied in order to select the best possible model to detect mislabelled data in multi-omic dataset.
+
+### Problem Description
+
+FDA provided 2 distincts datasets, one for training (80 samples) another for testing (80 samples), both consisting of two files: one for the clinical data information (with information about gender and MSI) and another one with all the proteomic information (4118 protein measurements).
+
+A swap rate of 10% was introduced in the proteomic data and 5% for the clinical data, generating in that way the mislabelled samples[2].
+For the training dataset, FDA provides a file indicating which samples are mislabelled.
+
+
+The challenge consists of creating a computational algorithm that can accurately detect the mislabelled samples in the test dataset.
+
+
+```{r}
+#![FDA Challenge Stage One](FDA_Challange.png)
+```
+
+### Data Exploration
+
+First, we load the data into dataframes
+
+```{r}
+clinical.train = read.delim('Data/train_cli.tsv', stringsAsFactors = FALSE)
+clinical.test  = read.delim('Data/test_cli.tsv', stringsAsFactors = FALSE)
+
+proteomic.train = as.data.frame(t(read.delim('Data/train_pro.tsv')))
+proteomic.test  =  as.data.frame(t(read.delim('Data/test_pro.tsv')))
+
+mismatch = read.delim('Data/sum_tab_1.csv', sep = ',')
+```
+
+We undertake some basic preparation for classification
+
+```{r}
+
+# 0 is male low MSI, 1 is male high MSI, 2 is female low MSI and 3 is female high MSI
+clinical.train$class = ifelse(clinical.train$gender == 'Female', 2, 0) + ifelse(clinical.train$msi == 'MSI-High', 1, 0)
+
+clinical.test$class = ifelse(clinical.test$gender == 'Female', 2, 0) + ifelse(clinical.test$msi == 'MSI-High', 1, 0)
+
+rownames(proteomic.train) = sprintf("Training_%02d", 1:80)
+rownames(proteomic.test) = sprintf("Testing_%02d", 1:80)
+
+rownames(clinical.train) = sprintf("Training_%02d", 1:80)
+rownames(clinical.test) = sprintf("Testing_%02d", 1:80)
+
+clinical.train.correct = clinical.train[!mismatch$mismatch,]
+
+```
+
+
+The proteomic data have 4118 different protein measurements and most of them are not completed (have NAs - missing values) as illustrated below:
+
+```{r}
+plot(sort(colSums(is.na(proteomic.train))), type = 'l')
+```
+
+The clinical data has two binary features for each sample: gender ('Male'/'Female') and MSI ('High-MSI'/'Low-MSI/MSS'). The class distributions are highly unbalanced as we visualise below:
+
+```{r}
+library(plyr)
+dfgender <- count(clinical.train, c('gender'))
+#dfgender
+df_msi <- count(clinical.train, c('msi'))
+#df_msi
+
+library(ggplot2)
+df <- data.frame(
+ group = c("Female", "Male"),
+ value = c(dfgender[1,2], dfgender[2,2])
+)
+
+df2 <- data.frame(
+ group = c("MSI-High", "MSI-Low"),
+ value = c(df_msi[1,2], df_msi[2,2])
+)
+
+
+bp <- ggplot(df, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+pie <- bp + coord_polar("y", start=0) + scale_fill_brewer(palette="Blues")+
+ theme_minimal() + ggtitle("Gender Distribution")
+
+
+
+bp2 <- ggplot(df2, aes(x="", y=value, fill=group)) +
+geom_bar(width = 1, stat = "identity")
+pie2 <- bp2 + coord_polar("y", start=0) + scale_fill_brewer(palette="")+
+ theme_minimal() + ggtitle("MSI Distribution")
+pie
+pie2
+
+table(factor(clinical.train$class, levels = c(0, 1, 2, 3), labels = c('Male-Low', 'Male-High', 'Female-Low', 'Female-High')))
+```
+
+
+
+
+### Data Preparation
+
+
+
+### Feature Selection
+
+#### Impute sample values
+
+```{r}
+
+# Impute a dataframe with the minimum value per column
+imputedf = function(x) {
+  df = x
+  for (i in 1:ncol(x)) {
+     if (is.numeric(df[,i])) {
+        df[which(is.na(df[,i])),i] = 0
+      }
+  }
+  df
+}
+
+# Remove any columns which will be constant on imputation
+remove = which(colSums(!is.na(proteomic.train)) < 2)
+
+# Combine train and test sets together
+proteomic.both = rbind(proteomic.train, proteomic.test)
+
+# Impute train and test columns with the same value
+proteomic.both.imputed = imputedf(proteomic.both)
+
+# Split the imputed dataframe
+proteomic.train.imputed = proteomic.both.imputed[1:80,-remove]
+proteomic.test.imputed = proteomic.both.imputed[81:160,-remove]
+
+
+
+
+# Find the correctly labelled samples
+proteomic.train.imputed.correct = proteomic.train.imputed[!mismatch$mismatch,]
+
+```
+
+#### Filter feature selection
+
+```{r}
+# Split the train data two ways: once by gender and once by MSI
+proteomic.train.imputed.by.gender  = split(proteomic.train.imputed, clinical.train$gender)
+proteomic.train.imputed.by.msi     = split(proteomic.train.imputed, clinical.train$msi)
+
+
+gender.pvalues = c()
+msi.pvalues    = c()
+
+# Calculate p values for the t-test on whether the means of the protein values are different when splitting by gender
+for (i in 1:ncol(proteomic.train.imputed)) {
+  gender.pvalues = c(gender.pvalues, t.test(proteomic.train.imputed.by.gender[[1]][,i], proteomic.train.imputed.by.gender[[2]][,i])$p.value)
+}
+
+# Calculate p values for the t-test on whether the means of the protein values are different when splitting by msi
+for (i in 1:ncol(proteomic.train.imputed)) {
+  msi.pvalues = c(msi.pvalues, t.test(proteomic.train.imputed.by.msi[[1]][,i], proteomic.train.imputed.by.msi[[2]][,i])$p.value)
+}
+
+# Add appropriate names to p values
+names(gender.pvalues) = colnames(proteomic.train.imputed)
+names(msi.pvalues)    = colnames(proteomic.train.imputed)
+
+# Select 100 features to keep based on each set of t tests
+keep.gender = names(sort(gender.pvalues))[1:100]
+keep.msi    = names(sort(msi.pvalues))[1:100]
+
+# Find the union of the two lists of features to keep
+keep = union(keep.gender, keep.msi)
+
+# The final training dataset
+proteomic.train.imputed.correct.keep = proteomic.train.imputed[!mismatch$mismatch, keep]
+
+
+```
+
+
+
+#### Wrapper Feature Selection
+
+
+```{r warnings = FALSE}
+
+# Load important libraries
+library(e1071)
+library(caret)
+
+nfolds = 5
+nvars = dim(proteomic.train.imputed.correct.keep)[2]
+
+set.seed(1)
+
+
+folds = createFolds(clinical.train.correct$class, nfolds)
+
+maxvars = 5
+
+include = c()
+acc.n = numeric(length = maxvars)
+
+
+for (k in 1:maxvars) {
+  acc.include = numeric(nvars)
+  p.names = colnames(proteomic.train.imputed.correct.keep)
+  names(acc.include) = p.names
+
+
+  tocheck = p.names[-which(p.names %in% include)]
+
+
+  for (t in tocheck) {
+    includetest = c(include, t)
+    cls = clinical.train.correct$class
+    train = cbind(proteomic.train.imputed.correct.keep[,includetest], cls)
+    acc.folds = numeric(length = nfolds)
+
+    for (i in 1:nfolds) {
+
+      svm.model = svm(factor(cls) ~ ., data = train[-folds[[i]],])
+      preds = predict(svm.model, newdata = train[folds[[i]],])
+      acc.folds[i] = mean(preds == cls[folds[[i]]])
+    }
+
+    acc.include[t] = mean(acc.folds)
+  }
+  toinclude = names(which.max(acc.include))
+  acc.n[k]  = max(acc.include)
+  include   = c(include, toinclude)
+  print(include)
+}
+
+
+plot(1:length(acc.n), acc.n, xlab = 'nfeatures', ylab = 'accuracy')
+
+
+#include = c("DDX3Y", "UBE2L6", "RPS4Y1","ARHGEF16","ARSE")
+```
+
+
+### Classification Approach
+
+
+```{r}
+
+svm.model = svm(factor(cls) ~ ., data = proteomic.train.imputed.correct[,include], probability = TRUE)
+
+
+preds.train = predict(svm.model, newdata = proteomic.train.imputed[, include], probability = TRUE)
+preds.test = predict(svm.model, newdata = proteomic.test.imputed[,include], probability = TRUE)
+
+
+preds.miscl.train = ifelse(preds.train != clinical.train$class, 1, 0) 
+
+
+recall(factor(preds.miscl.train), factor(mismatch$mismatch))
+precision(factor(preds.miscl.train), factor(mismatch$mismatch))
+F_meas(factor(preds.miscl.train), factor(mismatch$mismatch))
+
+preds.train.correct = predict(svm.model, newdata = proteomic.train.imputed.correct[,include], probability = TRUE)
+
+acc.cl = numeric(4)
+recall.cl = numeric(4)
+precision.cl = numeric(4)
+F1.cl = numeric(4)
+
+for (cl in 0:3) {
+  preds.cl.correct = ifelse(preds.train.correct == cl, 1, 0)
+  truth.cl.correct = ifelse(clinical.train.correct$class == cl, 1, 0)
+  
+  TP = sum((preds.cl.correct == truth.cl.correct)[preds.cl.correct == 1])
+  TN = sum((preds.cl.correct == truth.cl.correct)[preds.cl.correct == 0])
+  FP = sum((preds.cl.correct != truth.cl.correct)[preds.cl.correct == 1])
+  FN = sum((preds.cl.correct != truth.cl.correct)[preds.cl.correct == 0])
+  
+  acc.cl[cl + 1] = (TP + TN) / (TP + TN + FP + FN)
+  recall.cl[cl + 1] = TP/(TP + FN)
+  precision.cl[cl + 1] = TP/(TP + FP)
+  F1.cl[cl + 1] = 2*TP/(2*TP + FN + FP)
+}
+
+
+mean(preds.miscl.train == mismatch$mismatch)
+
+mean(preds.train == clinical.train$class)
+
+
+
+
+mean(preds.test == clinical.test$class)
+
+
+names(recall.cl) = 0:3
+names(precision.cl) = 0:3
+names(F1.cl) = 0:3
+names(acc.cl) = 0:3
+
+results = data.frame(rbind(recall.cl,precision.cl,F1.cl, acc.cl ))
+colnames(results) = 0:3
+rownames(results) = c('recall', 'precision', 'F1', 'accuracy')
+results
+
+
+
+```
+
+
+
+
+
+### Evaluation
+```{r}
+probs.test = attr(preds.test, 'probabilities')
+
+probs.test = probs.test[,c(2,3,1,4)]
+
+probs.miscl.test = numeric(length = 80)
+
+for (s in 1:80) {
+  probs.miscl.test[s] = 1 - probs.test[s,clinical.test$class[s] + 1]
+}
+
+hist(probs.miscl.test)
+
+preds.miscl.test = ifelse(probs.miscl.test > 0.5, 1, 0)
+cbind(probs.miscl.test, preds.miscl.test)
+```
+### Conclusion
+
+### References
+
+###Two class Approach
+```{r library1, echo=FALSE}
+library(class)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(caret)
+library(e1071)
+
+
+#Define evaluation functions
+
+# F1 score
+F1 <- function(mat) {
+  apply(mat, 1, function(x){
+    TN <- x[1]
+    FP <- x[2]
+    TP <- x[3]
+    FN <- x[4]
+    2*TP/(2*TP+FP+FN)
+  })
+}
+
+# Specificity
+SPE <- function(mat) {
+  apply(mat, 1, function(x){
+    TN <- x[1]
+    FP <- x[2]
+    
+    TN/(TN+FP)
+  })
+}
+
+# Sensitivity
+SEN <- function(mat) {
+  apply(mat, 1, function(x){
+    TP <- x[1]
+    FN <- x[2]
+    
+    TP/(TP+FN)
+  })
+}
+
+```
+####Clean and process train data
+
+```{r clean_train, echo=FALSE}
+
+
+train.pro <- read.table("data/train_pro.tsv", sep="\t", header=T)
+
+data.train <- train.pro
+
+#replace NA with minimum value of that column
+for(i in 1:ncol(data.train)){
+  value_replace <- min(data.train[,i], na.rm = TRUE)
+  data.train[is.na(data.train[,i]), i] <- value_replace
+}
+
+#transpose the matrix
+data <- t(as.matrix(data.train))
+
+data.mat.all <- data #keep for sampling apply
+
+
+train.cli <- read.table("data/train_cli.tsv", sep="\t", header=T)
+
+cls.df <- train.cli
+cls.train.all <- cls.df 
+
+cls.train.all$cls <- paste(cls.train.all$gender, cls.train.all$msi)
+
+
+
+data.cls1 <- sapply(X=cls.df$gender, FUN = function(x) {ifelse(x == "Male", 1, 0)})
+data.cls2 <- sapply(X=cls.df$msi, FUN = function(x) {ifelse(x == "MSI-High", 1, 0)})
+
+
+data.df <- data.frame(cbind(cls1=data.cls1, cls2=data.cls2, cbind(data[,])))
+
+#Keep all 80 train data to predict mislabell
+data.train.all <- data.df
+data.train.cls1 <- data.cls1
+data.train.cls2 <- data.cls2
+
+
+train.mismatch <- read.csv("data/sum_tab_1.csv", header = T)
+#train.mismatch
+
+#correctly labeled data
+mismatch.df <- filter(train.mismatch, mismatch == 0)
+
+
+mismatch.df.Incorrect <- filter(train.mismatch, mismatch == 1)
+#mismatch.df 
+
+```
+####Clean and process test data
+```{r clean_test, echo=FALSE}
+
+
+test.pro <- read.table("data/test_pro.tsv", sep="\t", header=T)
+
+data.test <- test.pro
+
+for(i in 1:ncol(test.pro)){
+  value_replace <- min(data.test[,i], na.rm = TRUE)
+  data.test[is.na(data.test[,i]), i] <- value_replace
+}
+
+test.mat <- t(as.matrix(data.test))
+
+
+test.cli <- read.table("data/test_cli.tsv", sep="\t", header=T)
+
+cls.df.test <- test.cli
+
+test.cls1 <- sapply(X=cls.df.test$gender, FUN = function(x) {ifelse(x == "Male", 1, 0)})
+test.cls2 <- sapply(X=cls.df.test$msi, FUN = function(x) {ifelse(x == "MSI-High", 1, 0)})
+
+
+cls.df.test <- test.cli
+cls.df.test$cls <- paste(cls.df.test$gender, cls.df.test$msi)
+
+
+test.df <- data.frame(cbind(cls=cls.df.test[,-c(1,2,3)], cbind(test.mat[,])))
+
+
+```
+
+
+#### Filter Correct labelled data
+```{r filter_train, echo=FALSE}
+data.df.correct <- filter(data.df, row.names(data.df) %in% mismatch.df$sample)
+
+row.names(data.df.correct) <- mismatch.df$sample
+cls.df.correct <- filter(cls.df, row.names(data.df) %in% mismatch.df$sample)
+
+data.cls1.correct <- sapply(X=cls.df.correct$gender, FUN = function(x) {ifelse(x == "Male", 1, 0)})
+data.cls2.correct <- sapply(X=cls.df.correct$msi, FUN = function(x) {ifelse(x == "MSI-High", 1, 0)})
+
+```
+
+####Wrapper feature selection (Forward stepwise selection)
+
+
+```{r forward_Step, echo=FALSE}
+
+set.seed(123)
+
+#function to select feature--------------
+
+selectFeature <- function(train, test, cls.train, cls.test, features) {
+  ## identify a feature to be selected
+  current.best.accuracy <- -Inf
+  selected.i <- NULL
+  for(i in 1:ncol(train)) {
+    current.f <- colnames(train)[i]
+    if(!current.f %in% features) {
+      model <- knn(train=train[,c(features, current.f)], test=test[,c(features, current.f)], cl=cls.train, k=3)
+      test.acc <- sum(model == cls.test) / length(cls.test)
+      
+      if(test.acc > current.best.accuracy) {
+        current.best.accuracy <- test.acc
+        selected.i <- colnames(train)[i]
+      }
+    }
+  }
+  return(selected.i)
+}
+
+
+# For Gender label
+data <- data.df.correct[, -2]
+data.byGender <- split(data[,-1], as.factor(data$cls1))
+
+feature.pvalues.gender <- c()
+for(i in 1:(ncol(data)-1)) {
+  feature.pvalues.gender <- c(feature.pvalues.gender, t.test(data.byGender[[1]][,i], data.byGender[[2]][,i])$p.value)
+}
+
+#
+
+names(feature.pvalues.gender) = colnames(data[,-1])
+
+# filter the top 10 most discriminative features based on p-values
+filtered.features.gender <- names(sort(feature.pvalues.gender)[1:100])
+
+
+
+names(feature.pvalues.gender) = colnames(data[,-1])
+
+# filter the top 10 most discriminative features based on p-values
+filtered.features.gender <- names(sort(feature.pvalues.gender)[1:100])
+
+
+#Select features for label1 cls1
+
+inTrain <- createDataPartition(data$cls1, p = .6)[[1]]
+allFeatures <- colnames(data)[-1]
+train <- data[ inTrain,-1]
+
+train <- train[,filtered.features.gender]
+test  <- data[-inTrain,-1]
+cls.train <- data$cls1[inTrain]
+cls.test <- data$cls1[-inTrain]
+
+
+# use correlation to determine the first feature
+#cls.train.numeric <- rep(c(0, 1), c(sum(cls.train == 0), sum(cls.train == 1)))
+cls.train.numeric <-data.df.correct[ inTrain, 1]
+
+
+features1 <- c()
+current.best.cor <- 0
+for(i in 1:ncol(train[,-1])) {
+  if(current.best.cor < abs(cor(train[,i], cls.train.numeric))) {
+    current.best.cor <- abs(cor(train[,i], cls.train.numeric))
+    features1 <- colnames(train)[i]
+  }
+}
+
+train.selected.gender <- train[, filtered.features.gender]
+
+# select the 7 to 6  best features using knn as a wrapper classifier
+for (j in 2:20) {
+  selected.i <- selectFeature(train.selected.gender, test, cls.train, cls.test, features1)
+  
+  # add the best feature from current run
+  features1 <- c(features1, selected.i)
+}
+
+print("Top features for Gender (Male/Female)")
+print(features1)
+
+
+
+
+##For MSI
+
+data <- data.df.correct[, -1]
+
+data.byMSI <- split(data[,-1], as.factor(data$cls2))
+
+
+feature.pvalues.msi <- c()
+for(i in 1:(ncol(data)-1)) {
+  feature.pvalues.msi <- c(feature.pvalues.msi, t.test(data.byMSI[[1]][,i], data.byMSI[[2]][,i])$p.value)
+}
+
+#
+
+names(feature.pvalues.msi) = colnames(data[,-1])
+
+# filter the top 10 most discriminative features based on p-values
+filtered.features.MSI <- names(sort(feature.pvalues.msi)[1:100])
+
+
+##
+#library(caret)
+
+set.seed(1)
+
+
+
+
+#Select features for label2 cls2
+
+data <- data.df.correct[, -1]
+
+
+
+inTrain <- createDataPartition(data$cls2, p = .7)[[1]]
+allFeatures <- colnames(data)[-1]
+train <- data[ inTrain,-1]
+train <- train[, filtered.features.MSI]
+
+test  <- data[-inTrain,-1]
+cls.train <- data$cls2[inTrain]
+cls.test <- data$cls2[-inTrain]
+
+# use correlation to determine the first feature
+
+cls.train.numeric <-data.df.correct[ inTrain, 1]
+
+features2 <- c()
+current.best.cor <- 0
+for(i in 1:ncol(train[,])) {
+  if(current.best.cor < abs(cor(train[,i], cls.train.numeric))) {
+    current.best.cor <- abs(cor(train[,i], cls.train.numeric))
+    features2 <- colnames(train)[i]
+  }
+}
+
+train.selected.MSI <- train[, filtered.features.MSI]
+
+# select the 2 to 20  best features using knn as a wrapper classifier
+for (j in 2:20) {
+  selected.i <- selectFeature(train.selected.MSI, test, cls.train, cls.test, features2)
+  
+  # add the best feature from current run
+  features2 <- c(features2, selected.i)
+}
+print("Top features for msi (MSI-Low/MSS or MSI-High ):")
+print(features2)
+
+
+#features2 <- c("LSP1" ,  "NCF2" ,  "PGD" ,   "CAB39L" , "TAP2" ,   "MRE11" , "STAT1" , "ITGB2" , "TMLHE" , "HK3" ,   "MCM7" ,  "MCM3" ,  "NUBPL" , "TAPBP",  "HNF4A" , "LCP1"  , "MCM6" ,  "MTIF2" , "PFKP" ,  "FARP2" )
+
+```
+
+####Analyse accuracy and choose appropriate number of features for label Gender(Male/Female) from that
+```{r feature_Gender, echo=FALSE}
+
+
+data.match <- data.df.correct[, -c(1,2)]
+
+data.mat <- apply(data.mat.all, MARGIN = 2, as.numeric)
+#data.cls <- train.cli.org
+data.cls <- data.cls1
+
+fold <- createFolds(data.cls, k=4)
+
+features1
+#fold
+data <- data.df.correct[, -2]
+features <- features1
+
+accu.label1.vec <- c()
+feature.label1.vec <- c()
+
+for(i in 2: length(features1))
+{
+  
+      features <- features1[1:i]
+      
+      # fitting the classifier on top 10 wrapper selected features
+      train=data[inTrain,features]
+      
+      test=data[-inTrain,features]
+     
+      cls.train=data[inTrain,]$cls1
+      
+      cls.test=data[-inTrain,]$cls1
+      
+      knn.fit3 <- knn(train=train, test=test, cl=cls.train, k=5, prob=TRUE)
+      table(knn.fit3, cls.test)
+      
+      accuracy.feature.label1 <- sum(cls.test==knn.fit3)/length(cls.test)
+      accuracy.feature.label1
+      
+      accu.label1.vec <- append(accu.label1.vec,  accuracy.feature.label1)
+      
+      feature.label1.vec <-append(feature.label1.vec, i)
+
+}
+
+df.label1.acu <- data.frame(cbind(Num_Feature=feature.label1.vec, Accuracy=accu.label1.vec))
+#max(accu.label1.vec)
+
+ggplot(df.label1.acu, aes(x=Num_Feature, y=Accuracy)) + geom_point(size=3, col="red") + geom_line(col="blue", lwd=1) +
+   ggtitle("Number of features vs. Model Accuracy for gender (Male/Female)") + 
+  xlab("Number of features") + ylab("Accuracy") + scale_y_continuous(labels=scales::percent)
+
+```
+
+####Analyse accuracy and choose appropriate number of features for label msi ()
+
+```{r feature_MSI, echo=FALSE}
+data <- data.df.correct[, -1]
+
+data <- data.df.correct[, -1]
+features <- features2
+
+
+accu.label2.vec <- c()
+feature.label2.vec <- c()
+
+for(i in 2: length(features2))
+{
+  
+      features <- features2[1:i]
+
+    train=data[inTrain,features]
+    test=data[-inTrain,features]
+    cls.train=data[inTrain,]$cls2
+    cls.test=data[-inTrain,]$cls2
+   
+    
+    knn.fit3 <- knn(train=train, test=test, cl=cls.train, k=5, prob=TRUE)
+    table(knn.fit3, cls.test)
+    
+    accuracy.feature.label2 <- sum(cls.test==knn.fit3)/length(cls.test)
+    accuracy.feature.label2
+    
+    accu.label2.vec <- append(accu.label2.vec,  accuracy.feature.label2)
+      
+      feature.label2.vec <-append(feature.label2.vec, i)
+
+}
+
+df.label2.acu <- data.frame(cbind(Num_Feature=feature.label2.vec, Accuracy=accu.label2.vec))
+
+#df.label2.acu
+
+
+ggplot(df.label2.acu, aes(x=Num_Feature, y=Accuracy)) + geom_point(size=3, col="red") + geom_line(col="blue", lwd=1) + ggtitle("Number of features vs. Model Accuracy for msi") + 
+  xlab("Number of features") + ylab("Accuracy") + scale_y_continuous(labels=scales::percent)
+
+```
+
+####Classify Gender (Male/Female) of 68 Correct Train data
+```{r knn_train_Gender, echo=FALSE}
+
+data.match <- data.df.correct[, -c(1,2)]
+
+
+data.mat <- apply(data.mat.all, MARGIN = 2, as.numeric)
+
+data.cls <- data.cls1
+
+
+TP <- TN <- FP <- FN <- c()
+
+fold <- createFolds(data.cls, k=4)
+
+#fold
+data <- data.df.correct[, -2]
+features <- features1[1:6]
+
+accuracy.feature.label1.vec <- c()
+
+#for(i in 1:length(fold)){
+  
+   
+
+      # fitting the classifier on top 10 wrapper selected features
+      train= data[inTrain,features] #data[ -fold[[i]],features]   #
+      
+      test=data[-inTrain,features] #data[ fold[[i]],features]
+     
+      cls.train=data[inTrain,]$cls1 #data[ -fold[[i]],]$cls1
+      
+      cls.test=data[-inTrain,]$cls1 #data[ fold[[i]],]$cls1
+     
+      knn.fit.labele1 <- knn(train=train, test=test, cl=cls.train, k=3, prob=TRUE)
+      
+     
+      table(knn.fit.labele1, cls.test)
+      
+      accuracy.feature.label1 <- sum(cls.test==knn.fit.labele1)/length(cls.test)
+      
+      accuracy.feature.label1.vec <- append(accuracy.feature.label1.vec, accuracy.feature.label1)
+      
+      TP <- c(TP, sum((cls.test == knn.fit.labele1)[cls.test == "1"]))
+      TN <- c(TN, sum((cls.test == knn.fit.labele1)[cls.test == "0"]))
+      FP <- c(FP, sum((cls.test!= knn.fit.labele1)[knn.fit.labele1 == "1"]))
+      FN <- c(FN, sum((cls.test != knn.fit.labele1)[knn.fit.labele1 == "0"]))
+      
+#} 
+
+#accuracy.feature.label1.vec
+
+print(paste("Mean F1 Score: ",mean(F1(cbind(TN, FP, TP, FN)))))
+
+#Fit knn with all train data and classify train data using this this classifier to check train accuracy
+
+knn_f.label1.train <- knn(train=train, test=data[,features], cl=cls.train, k=3, prob=TRUE)
+accuracy_f.train.label1 <- sum(data$cls1==knn_f.label1.train)/length(data$cls1)
+
+print(paste("Accuracy on train correctly labelled data for (male/female):", accuracy_f.train.label1))
+
+
+```
+
+####Predict Gender (Male/Female) of Test Data
+
+```{r knn_test_Gender, echo=FALSE}
+set.seed(123)
+features <- features1[1:3]
+
+
+train.all <- data[,features]
+
+cls.train <- data.cls1.correct
+test.all <- test.mat[, features]
+
+knn.test.label1 <- knn(train=train.all, test=test.all, cl=cls.train, k=3, prob=TRUE)
+
+accuracy_f.test.label1 <- sum(test.cls1==knn.test.label1)/length(test.cls1)
+
+
+print(paste("Accuracy of predicting gender in test Data:", accuracy_f.test.label1))
+print(paste("Number of correct gender in test data:", sum(knn.test.label1==test.cls1)))
+
+```
+####Predict Gender (Male/Female) of all train 80 Data
+
+```{r knn_train_all_Gender, echo=FALSE}
+set.seed(123)
+features <- features1[1:3]
+train.all <- data[,features]
+cls.train <- data.cls1.correct
+test.all <- data.train.all[, features]
+
+
+knn.train.all.label1 <- knn(train=train.all, test=test.all, cl=cls.train, k=3, prob=TRUE)
+
+accuracy.train.all.label1 <- sum(data.train.cls1==knn.train.all.label1)/length(data.train.cls1)
+
+
+print(paste("Accuracy of predicting gender in train all 80 Data:", accuracy.train.all.label1))
+print(paste("Number of correct gender in test data:", sum(knn.train.all.label1==data.train.cls1)))
+
+```
+
+####Classify Label MSI (MSI-Low/MSS or MSI-High) to using top 4 wrapper selected features
+```{r knn_train_all_MSI, echo=FALSE}
+# fitting the classifier on top 10 wrapper selected features
+
+data <- data.df.correct[, -1]
+
+TP <- TN <- FP <- FN <- c()
+
+data <- data.df.correct[, -1]
+features <- features2[1:6]
+
+    train=data[inTrain,features]
+    test=data[-inTrain,features]
+    cls.train=data[inTrain,]$cls2
+    cls.test=data[-inTrain,]$cls2
+    
+    
+    knn.fit.label2 <- knn(train=train, test=test, cl=cls.train, k=5, prob=TRUE)
+    table(knn.fit.label2, cls.test)
+    
+    #Accuracy of validation set from train data
+    accuracy.feature.label2 <- sum(cls.test==knn.fit.label2)/length(cls.test)
+    
+   
+
+      #Fit knn with all train data and classify train data using this this classifier to check train accuracy
+      
+       
+       
+      knn_f.label2.train <- knn(train=train, test=data[,features], cl=cls.train, k=3, prob=TRUE)
+      accuracy_f.train.label2 <- sum(data$cls2==knn_f.label2.train)/length(data$cls2)
+      
+       print(paste("Accuracy of label (MSI) for train correctly labelled data: ",accuracy_f.train.label2))
+     
+      cls.test <- data$cls2
+      
+      TP <- c(TP, sum((cls.test == knn_f.label2.train)[cls.test == "1"]))
+      TN <- c(TN, sum((cls.test == knn_f.label2.train)[cls.test == "0"]))
+      FP <- c(FP, sum((cls.test!= knn_f.label2.train)[knn_f.label2.train == "1"]))
+      FN <- c(FN, sum((cls.test != knn_f.label2.train)[knn_f.label2.train == "0"]))
+      
+      print(paste("F1 Score for MSI of train data: ",mean(F1(cbind(TN, FP, TP, FN)))))
+
+
+```
+
+####Combined Gender and MSI to and check with train correctly  labelled 68 data
+```{r knn_train_all_both, echo=FALSE}
+
+
+pred.labels.all <- data.frame(cbind(cls1=knn_f.label1.train, cls2=knn_f.label2.train))
+
+gender.vec <- sapply(X=pred.labels.all$cls1, FUN = function(x) {ifelse(x == 1, "Female", "Male")})
+
+msi.vec <- sapply(X=pred.labels.all$cls2, FUN = function(x) {ifelse(x == 1, "MSI-Low/MSS", "MSI-High")})
+pred.labels.all <- data.frame(cbind(gender=gender.vec,msi=msi.vec))
+
+
+pred.labels.all$cls <- paste(pred.labels.all$gender, pred.labels.all$msi)
+
+
+cls.df.correct$cls <- paste(cls.df.correct$gender, cls.df.correct$msi)
+
+
+
+accuracy.both.label <- sum(cls.df.correct$cls==pred.labels.all$cls)/length(pred.labels.all$cls)
+
+print(paste("Accuracy of Gender and MSI together for train correctly labelled data: ",accuracy.both.label))
+
+
+```
+
+####Question2: A predicted list of mislabelled samples from training data
+####Predict MSI (MSI-Low/MSS or MSI-High) of train 80 Data
+
+```{r knn_train_all_both1, echo=FALSE}
+set.seed(123)
+features <- features2[1:6]
+train.all <- data[,features]
+cls.train <- data.cls2.correct
+test.all <- data.train.all[, features]
+
+
+knn.train.all.label2 <- knn(train=train.all, test=test.all, cl=cls.train, k=3, prob=TRUE)
+
+accuracy.train.all.label2 <- sum(data.train.cls2==knn.train.all.label2)/length(data.train.cls2)
+
+
+print(paste("Accuracy of predicting gender in train all 80 Data:", accuracy.train.all.label2))
+print(paste("Number of correct gender in test data:", sum(knn.train.all.label2==data.train.cls2)))
+
+
+#################### Join both predcted label and compare with ground truth--------------for 80 train data
+
+#Join both predicted label together
+pred.labels.all.train <- data.frame(cbind(cls1=knn.train.all.label1, cls2=knn.train.all.label2))
+
+gender.vec <- sapply(X=pred.labels.all.train$cls1, FUN = function(x) {ifelse(x == 1, "Female", "Male")})
+
+msi.vec <- sapply(X=pred.labels.all.train$cls2, FUN = function(x) {ifelse(x == 1, "MSI-Low/MSS", "MSI-High")})
+pred.labels.all.train <- data.frame(cbind(gender=gender.vec,msi=msi.vec))
+
+
+pred.labels.all.train$cls <- paste(pred.labels.all.train$gender, pred.labels.all.train$msi)
+
+
+
+rownames.vec <- c()
+mismatch.vec <- c()
+
+for(i in 1: nrow(test.df)){
+  
+  mismatch <- ifelse(pred.labels.all.train$cls[i]==cls.train.all$cls[i], 0 , 1)
+  mismatch.vec <- append(mismatch.vec, mismatch)
+  rownames.vec <- append(rownames.vec, paste("Training", i, sep = "_"))
+  
+  
+}
+
+predicted.mismatch.df <- data.frame(cbind(sample=rownames.vec, mismatch=mismatch.vec))
+predicted.mismatch.df <- predicted.mismatch.df[,1:2]
+
+
+mismatchlist <- predicted.mismatch.df[mismatch==1]
+
+print("table of label (gender and MSI) mismatch for train 80 data comapare with graound truth:")
+table(train.mismatch$mismatch, mismatchlist$mismatch)
+
+
+write.csv(predicted.mismatch.df, file = "Predicted_FS_train1.csv")
+
+
+#Test using loop
+
+match <- 0
+
+
+for(i in 1 :80){
+  
+  if((data.train.cls2[i]==knn.train.all.label2[i]) & (data.train.cls1[i]==knn.train.all.label1[i])){
+    match <- match +1
+  }
+}
+
+print(paste("Number of mislabelled samples of train 80 data predicted by our model :", (80-match)))
+
+
+```
+
+####Predict MSI (MSI-Low/MSS or MSI-High) of Test Data
+
+```{r knn_test_all_both1, echo=FALSE}
+set.seed(123)
+features <- features2[1:6]
+train.all <- data[,features]
+cls.train <- data.cls2.correct
+test.all <- test.mat[, features]
+
+
+knn.test.label2 <- knn(train=train.all, test=test.all, cl=cls.train, k=5, prob=TRUE)
+
+accuracy_f.test.label2 <- sum(test.cls2==knn.test.label2)/length(test.cls2)
+
+print(paste("Accuracy of label2 (MSI) for  test data: ",accuracy_f.test.label2))
+print(paste("Number of correct MSI in test data:", sum(test.cls1==knn.test.label1)))
+
+
+#Join both predicted label together
+pred.labels.all.test <- data.frame(cbind(cls1=knn.test.label1, cls2=knn.test.label2))
+
+gender.vec <- sapply(X=pred.labels.all.test$cls1, FUN = function(x) {ifelse(x == 1, "Female", "Male")})
+
+msi.vec <- sapply(X=pred.labels.all.test$cls2, FUN = function(x) {ifelse(x == 1, "MSI-Low/MSS", "MSI-High")})
+pred.labels.all.test <- data.frame(cbind(gender=gender.vec,msi=msi.vec))
+
+
+pred.labels.all.test$cls <- paste(pred.labels.all.test$gender, pred.labels.all.test$msi)
+
+
+rownames.vec <- c()
+mismatch.vec <- c()
+
+for(i in 1: nrow(test.df)){
+  
+  mismatch <- ifelse(pred.labels.all.test$cls[i]==test.df$cls[i], 0 , 1)
+  mismatch.vec <- append(mismatch.vec, mismatch)
+  rownames.vec <- append(rownames.vec, paste("Training", i, sep = "_"))
+  
+}
+
+predicted.mismatch.df <- data.frame(cbind(sample=rownames.vec, mismatch=mismatch.vec))
+predicted.mismatch.df <- predicted.mismatch.df[,1:2]
+
+write.csv(predicted.mismatch.df, file = "Predicted_FS_Test.csv")
+
+
+#Test using loop to compare our predicted label with test 80 data and Identify how many mislabel in test data
+#Will add more code to generate text/csv file later
+
+match.test <- 0
+
+for(i in 1 :80){
+  
+  if((test.cls2[i]==knn.test.label2[i]) & (test.cls1[i]==knn.test.label1[i])){
+    match.test <- match.test +1
+  }
+}
+
+print(paste("Number of mislabelled samples of test 80 data predicted by our model :", (80-match.test)))
+
+
+```
+
+####AdaSampling to predict Gender(Male/Female) 80 train data
+```{r ada_train_gender, echo=FALSE}
+library(AdaSampling)
+
+data <- data.df[, -2]
+
+TP <- TN <- FP <- FN <- c()
+
+features <- features1[1:3]
+
+inTrain <- createDataPartition(data$cls1, p = .6)[[1]]
+train=data[inTrain,features]
+test=data[-inTrain,features]
+cls.train=data[inTrain,]$cls1
+cls.test=data[-inTrain,]$cls1
+
+Ps <- rownames(train)[which(cls.train == 1)]
+Ns <- rownames(train)[which(cls.train == 0)]
+
+pred.prob.ada <- adaSample(Ps, Ns, train, test, classifier="svm", C=10)
+
+pred.label1.ada <- ifelse(pred.prob.ada[,"P"] > 0.5, 1, 0)
+
+  TP <- c(TP, sum((cls.test == pred.label1.ada)[cls.test == "1"]))
+  TN <- c(TN, sum((cls.test == pred.label1.ada)[cls.test == "0"]))
+  FP <- c(FP, sum((cls.test!= pred.label1.ada)[pred.label1.ada == "1"]))
+  FN <- c(FN, sum((cls.test != pred.label1.ada)[pred.label1.ada == "0"]))
+
+acc.label1.ada <- (TP + TN)/(TP +TN +FP +FN)
+print(paste("Accuracy for  Gender (Male/Female) of train using Ada Sampling:", acc.label1.ada))
+paste("F1 Score for Gender (Male/Female) of train data using Ada Sampling: ",mean(F1(cbind(TN, FP, TP, FN))))
+
+```
+
+
+####AdaSampling to predict MSI(MSI-Low/MSS or MSI-High) 80 train data
+```{r ada_train_msi, echo=FALSE}
+
+data <- data.df[, -1]
+
+TP <- TN <- FP <- FN <- c()
+
+features <- features2[1:6]
+
+inTrain <- createDataPartition(data$cls2, p = .6)[[1]]
+
+train=data[inTrain,features]
+test=data[-inTrain,features]
+cls.train=data[inTrain,]$cls2
+cls.test=data[-inTrain,]$cls2
+
+
+Ps <- rownames(train)[which(cls.train == 1)]
+Ns <- rownames(train)[which(cls.train == 0)]
+
+
+pred.prob.ada <- adaSample(Ps, Ns, train, test, classifier="svm", C=15)
+
+pred.label2.ada <- ifelse(pred.prob.ada[,"P"] > 0.5, 1, 0)
+
+
+  TP <- c(TP, sum((cls.test == pred.label2.ada)[cls.test == "1"]))
+  TN <- c(TN, sum((cls.test == pred.label2.ada)[cls.test == "0"]))
+  FP <- c(FP, sum((cls.test!= pred.label2.ada)[pred.label2.ada == "1"]))
+  FN <- c(FN, sum((cls.test != pred.label2.ada)[pred.label2.ada == "0"]))
+
+
+acc.label2.ada <- (TP + TN)/(TP +TN +FP +FN)
+
+print(paste("Accuracy for label MSI of all train data using Ada Sampling:", acc.label2.ada))
+
+paste("F1 Score for MSI of all train data using Ada Sampling: ",mean(F1(cbind(TN, FP, TP, FN))))
+
+```
+
+####AdaSampling to predict Gender(Male/Female) 80 test data
+```{r ada_test_gender, echo=FALSE}
+
+data <- data.df[, -2]
+
+TP <- TN <- FP <- FN <- c()
+
+features <- features1[1:4]
+
+train=data[,features]
+test=test.mat[,features]
+cls.train=data$cls1
+
+cls.test=test.cls1
+
+Ps <- rownames(train)[which(cls.train == 1)]
+
+Ns <- rownames(train)[which(cls.train == 0)]
+
+pred.prob.ada <- adaSample(Ps, Ns, train, test, classifier="svm", C=15)
+
+pred.label1.ada <- ifelse(pred.prob.ada[,"P"] > 0.5, 1, 0)
+
+print(paste("Number of correctly predicted Gender in test data:", sum(pred.label1.ada==test.cls1)))
+
+
+  TP <- c(TP, sum((cls.test == pred.label1.ada)[cls.test == "1"]))
+  TN <- c(TN, sum((cls.test == pred.label1.ada)[cls.test == "0"]))
+  FP <- c(FP, sum((cls.test!= pred.label1.ada)[pred.label1.ada == "1"]))
+  FN <- c(FN, sum((cls.test != pred.label1.ada)[pred.label1.ada == "0"]))
+
+
+
+print(paste("Accuracy for  Gender (Male/Female) of test data using Ada Sampling:", acc.label1.ada))
+
+paste("F1 Score for Gender (Male/Female) of test data using Ada Sampling: ",mean(F1(cbind(TN, FP, TP, FN))))
+
+```
+
+####AdaSampling to predict MSI 80 test data
+```{r ada_test_msi, echo=FALSE}
+set.seed(1)
+
+
+data <- data.df[, -1]
+
+TP <- TN <- FP <- FN <- c()
+
+features <- features2[1:6]
+
+train=data[,features]
+test=test.mat[,features]
+cls.train=data$cls2
+cls.test=test.cls2
+
+
+
+Ps <- rownames(train)[which(cls.train == 1)]
+Ns <- rownames(train)[which(cls.train == 0)]
+
+pred.prob.ada <- adaSample(Ps, Ns, train, test, classifier="svm", C=15)
+
+pred.label2.ada <- ifelse(pred.prob.ada[,"P"] > 0.5, 1, 0)
+print(paste("Number of correct MSI in test data:", sum(pred.label2.ada==test.cls2)))
+
+
+  TP <- c(TP, sum((cls.test == pred.label2.ada)[cls.test == "1"]))
+  TN <- c(TN, sum((cls.test == pred.label2.ada)[cls.test == "0"]))
+  FP <- c(FP, sum((cls.test!= pred.label2.ada)[pred.label2.ada == "1"]))
+  FN <- c(FN, sum((cls.test != pred.label2.ada)[pred.label2.ada == "0"]))
+
+ table(test.cls2, pred.label2.ada)
+
+acc.label2.ada <- (TP + TN)/(TP +TN +FP +FN)
+
+print(paste("Accuracy for  MSI of test data using Ada Sampling:", acc.label2.ada))
+
+paste("F1 Score for MSI of test data using Ada Sampling:",mean(F1(cbind(TN, FP, TP, FN))))
+
+match <- 0
+
+for(i in 1 :80){
+  
+  if((test.cls2[i]==pred.label2.ada[i]) & (test.cls1[i]==pred.label1.ada[i])){
+    match <- match +1
+  }
+}
+
+
+print(paste("Number of Test data predicted as correctly labelelled both Gender and MSI :", match))
+
+```
+
+
+
+
