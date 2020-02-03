@@ -1,6 +1,6 @@
 ---
 title: "FDA Challange - Mismatch Detection"
-author: "Jean Ge, Josh Wildig, Luis E. Muller, Sayed Hasan, Tomal Karmakar"
+author: "Syed Mehedi Hasan"
 date: "21/10/2018"
 output: 
   html_document:
